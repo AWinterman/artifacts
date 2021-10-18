@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Artifacts</title>
+    <!-- Compressed CSS -->
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/foundation-sites@6.6.3/dist/css/foundation.min.css" integrity="sha256-ogmFxjqiTMnZhxCqVmcqTvjfe1Y/ec4WaRj/aQPvn+I=" crossorigin="anonymous">
+
+    <!-- Compressed JavaScript -->
+    <script src="https://cdn.jsdelivr.net/npm/foundation-sites@6.6.3/dist/js/foundation.min.js" integrity="sha256-pRF3zifJRA9jXGv++b06qwtSqX1byFQOLjqa2PTEb2o=" crossorigin="anonymous"></script>
+</head>
+<body>
+
+
+  <form method="get" action="", id="ListingControlsElement">
+    <label for="status-select">
+      Status
+    </label>
+    <select name="status" id="status-select">
+      <option value=""></option>
+      {{ range .Statuses }}
+      <option value="{{.}}">{{.}}</option>
+      {{ end }}
+    </select>
+
+    <label for="namespace-input">Namespce Substring</label>
+    <input name="namespace" id="namespace-input" type="text">
+
+    <label for="package-input">Package Substring</label>
+    <input name="package" id="package-input" type="text">
+
+    <button class="success button" type="submit">Submit</button>
+
+  </form>
+
+  <table>
+    <thead>
+      <tr>
+        <th>repository</th>
+        <th>namespace</th>
+        <th>package</th>
+        <th>version</th>
+        <th>status</th>
+        <th>create time</th>
+      </tr>
+    </thead>
+    <tr>
+      {{ range .Artifacts }}
+      <tr>
+        <td>{{ .Repository }}</td>
+        <td>{{ .Namespace }}</td>
+        <td>{{ .Package }}</td>
+        <td>{{ .Version }}</td>
+        <td>{{ .Status }}</td>
+        <td>{{ .CreateTime }}</td>
+      </tr>
+      {{ end}}
+    </tbody>
+  </table>
+</body>
+</html>

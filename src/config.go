@@ -6,15 +6,14 @@ import (
 )
 
 type Specification struct {
-	Domain        string   
-	PageSize      int      `default:"100""`
-	Region        string   `default:"us-east-1""`
-	Rethink       string   `default:"127.0.0.1:28015"`
-	SkipRepos     []string `default:"maven-central,maven-central-store"` // TODO remove before push
-	Listen    string `default:"localhost:3000"`
-	Load      bool   `default:"false"`
-	TableName string `default:"artifacts"`
-	DbName        string `default:"artifacts"`
+	Domain    string
+	PageSize  int      `default:"100""`
+	Region    string   `default:"us-east-1""`
+	DbFile    string   `default:".db.artifacts"`
+	SkipRepos []string `default:"maven-central,maven-central-store"` // TODO remove before push
+	Listen    string   `default:"localhost:3000"`
+	Load      bool     `default:"false"`
+	Templates string   `default:"src/templates/"`
 }
 
 // AwsPageSize returns the page size in *int64 so satisfy aws expectations :(
@@ -41,16 +40,3 @@ func LoadSpecification() (Specification, error) {
 	log.Info().Msgf("Found config: %+v", s)
 	return s, err
 }
-
-func (s *Specification) WithTableName(table string) Specification {
-	newSpec := *s
-	newSpec.TableName = table
-	return newSpec
-}
-
-func (s *Specification) WithDbNAme(table string) Specification {
-	newSpec := *s
-	newSpec.DbName = table
-	return newSpec
-}
-

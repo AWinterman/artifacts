@@ -1,197 +1,216 @@
 package artifacts
 
 import (
-	"github.com/aws/aws-sdk-go/service/codeartifact"
-	"github.com/rs/zerolog/log"
-	"github.com/sirupsen/logrus"
-	db "gopkg.in/rethinkdb/rethinkdb-go.v6"
-	"os"
+	asn1 "encoding/asn1"
+	log "github.com/rs/zerolog/log"
+	bolt "go.etcd.io/bbolt"
+	"strings"
 	"time"
 )
 
-type Artifact struct {
-	Repository string    `rethinkdb:"repository"`
-	Namespace  string    `rethinkdb:"namespace"`
-	Package    string    `rethinkdb:"package"`
-	Version    string    `rethinkdb:"version""`
-	Revision   string    `rethinkdb:"revision"`
-	DomainName string    `rethinkdb:"domain"`
-	Format     string    `rethinkdb:"format"`
-	Id         string    `rethinkdb:"id"`
-	Error      error     `rethinkdb:"-"`
-	Status     Status    `rethinkdb:"status"`
-	CreateTime time.Time `rethinkdb:"create_time"`
+func (a *Artifact) data() ArtifactData {
+	return ArtifactData{
+		Repository: a.Repository,
+		Revision:   a.Revision,
+		DomainName: a.DomainName,
+		Format:     a.Format,
+		Status:     a.Status,
+		CreateTime: a.CreateTime,
+	}
 }
 
-// Status represents package version status. See: https://docs.aws.amazon.com/codeartifact/latest/ug/packages-overview.html#package-version-status
-type Status string
-
-const (
-	Published  Status = "Published"
-	Unfinished Status = "Unfinished"
-	Unlisted   Status = "Unlisted"
-	Archived   Status = "Archived"
-	Disposed   Status = "Disposed"
-	Deleted    Status = "Deleted"
-)
-
-var AllStatuses = []Status{
-	Published,
-	Unfinished,
-	Unfinished,
-	Archived,
+type ArtifactData struct {
+	Repository string
+	Revision   string
+	DomainName string
+	Format     string
+	Status     Status
+	CreateTime time.Time
 }
 
-type Package struct {
-	*codeartifact.RepositorySummary
-	*codeartifact.PackageSummary
-	Error error
+func (a *Artifact) populateProblems() {
+	if a.Error != nil && len(a.Problems) == 0 {
+		a.Problems = []string{a.Error.Error()}
+	}
 }
 
-type RethinkStorage struct {
-	*db.Session
-	dbName    string
-	tableName string
+func (i ArtifactId) Marshal() ([]byte, error) {
+	return asn1.Marshal(i)
 }
 
-func InitDbConnection(s Specification) (*RethinkStorage, error) {
-	db.Log.Out = os.Stderr
-	db.Log.Level = logrus.DebugLevel
+func UnmarshalArtifactId(i []byte) (ArtifactId, error) {
+	id := ArtifactId{}
+	_, err := asn1.Unmarshal(i, &id)
+	return id, err
+}
 
-	session, err := db.Connect(db.ConnectOpts{
-		Address:  s.Rethink, // endpoint without http
-		Database: "artifact",
-	})
+func (a *ArtifactData) Bucket() []byte {
+	return []byte(a.Status)
+}
+
+func (a *ArtifactId) Key() ([]byte, error) {
+	return a.Marshal()
+}
+
+type BoltStorage struct {
+	db *bolt.DB
+}
+
+func NewStorage(s Specification) (*BoltStorage, error) {
+	db, err := bolt.Open(s.DbFile, 0666, nil)
+
 	if err != nil {
 		return nil, err
 	}
 
-	storage := RethinkStorage{
-		session,
-		s.DbName,
-		s.TableName,
+	storage := BoltStorage{
+		db,
 	}
-	err = storage.ensureTableExists()
 	return &storage, err
 }
 
-func (rs *RethinkStorage) ensureTableExists() error {
-	tablesCursor, err := db.DB("artifacts").TableList().Contains("artifacts").Run(rs)
-	if err != nil {
-		panic(err)
-	}
-
-	hasTable := false
-	err = tablesCursor.One(&hasTable)
-	if err != nil {
-		panic(err)
-	}
-
-	if !hasTable {
-		result, err := db.DB("artifacts").TableCreate("artifacts").RunWrite(rs)
-
-		if err != nil {
-			log.Fatal().Err(err)
-		}
-		log.Printf("Created table: %v", result)
-	}
-	return err
+type ValidationError struct {
+	Problems []string
 }
 
-func (rs *RethinkStorage) Insert(artifacts ...Artifact) []error {
-
-	errors := make([]error, len(artifacts))
-	for index, artifact := range artifacts {
-
-		term := rs.table().Insert(
-			artifact, db.InsertOpts{
-				Conflict: func(id, oldDoc, newDoc db.Term) interface{} {
-					return newDoc
-				},
-			},
-		)
-		write, err := term.RunWrite(rs)
-		errors[index] = err
-		log.Printf("Wrote %+v", write)
-	}
-	return errors
+func (v ValidationError) Error() string {
+	return "Validaiton problems"
 }
 
-func (rs *RethinkStorage) table() db.Term {
-	return db.DB(rs.dbName).Table(rs.tableName)
-}
-
-func (rs *RethinkStorage) List(status []Status, namespaceSubstring, packageIdSubstring string) ([]Artifact, error) {
-	results := make([]Artifact, 0)
-	listQuery := rs.artifactsQuery(status, namespaceSubstring, packageIdSubstring)
-
-	cursor, err := listQuery.Run(rs)
-
-	if err != nil {
-		return results, err
-	}
-
-	err = cursor.All(&results)
-	if err != nil {
-		return nil, err
-	}
-
-	return results, nil
-}
-
-func (rs *RethinkStorage) Changes(status []Status, namespaceSubstring, packageIdSubstring string, versions chan Artifact) {
-	listQuery := rs.artifactsQuery(status, namespaceSubstring, packageIdSubstring)
-
-	cursor, err := listQuery.Changes().Run(rs)
-
-	if err != nil {
-		versions <- Artifact{Error: err}
-	}
-
-	for {
-		artifact := Artifact{}
-		ok := cursor.Next(&artifact)
-		versions <- artifact
-		if !ok {
-			err := cursor.Err()
-			if err != nil {
-				versions <- Artifact{Error: err}
+func (rs *BoltStorage) Insert(artifacts ...Artifact) ([]Artifact, error) {
+	err := rs.db.Update(func(tx *bolt.Tx) error {
+		for _, artifact := range artifacts {
+			if len(artifact.Problems) > 0 {
+				continue
 			}
-			close(versions)
+
+			problems := make([]string, 0)
+			if artifact.ArtifactId.Version == "" {
+				problems = append(problems, "Must have a non-blank version")
+			}
+			if artifact.ArtifactId.Package == "" {
+				problems = append(problems, "Must have a non-blank package")
+			}
+			if artifact.ArtifactId.Namespace == "" {
+				problems = append(problems, "Must have a non-blank namespace")
+			}
+			if len(problems) > 0 {
+				artifact.Error = &ValidationError{
+					Problems: problems,
+				}
+				artifact.Problems = problems
+				continue
+			}
+
+			id := artifact.ArtifactId
+			data := artifact.data()
+
+			value, err := asn1.Marshal(data)
+
+			if err != nil {
+				return err
+			}
+
+			bucket := tx.Bucket(data.Bucket())
+			if bucket == nil {
+				log.Debug().Interface("bucket", artifact.Status).Interface("id", artifact.ArtifactId).Msg("Created bucket")
+				bucket, err = tx.CreateBucket(data.Bucket())
+				if err != nil {
+					artifact.Error = err
+					continue
+				}
+			}
+
+			key, err := id.Key()
+
+			if err != nil {
+				return err
+			}
+
+			err = bucket.Put(key, value)
+
+			if err != nil {
+				artifact.Error = err
+				continue
+			}
+
+			if artifact.Error != nil {
+				log.Err(err).Interface("artifact", artifact).Msg("Error inserting artifact")
+			}
+
 		}
-	}
+		return nil
+	})
+
+	log.Info().Err(err).Interface("artifacts", len(artifacts)).Msgf("Finished inset")
+
+	return artifacts, err
 }
 
+func substringMatch(needle, haystack string) bool {
+	log.Debug().Str("needle", needle).Str("haystack", haystack).Msg("Checking contains")
+	return needle == "" || strings.Contains(needle, haystack)
+}
 
+func (rs *BoltStorage) List(status []Status, namespaceSubstring, packageIdSubstring string) ([]Artifact, error) {
+	log.Info().
+		Interface("status", status).
+		Str("namespaceSubstring", namespaceSubstring).
+		Str("packageIdSubstring", packageIdSubstring).
+		Msg("List query")
 
-func (rs *RethinkStorage) artifactsQuery(status []Status, namespaceSubstring string, packageIdSubstring string) db.Term {
-	if len(status) == 0 {
-		status = []Status{
-			Published,
+	results := make([]Artifact, 0)
+	err := rs.db.View(func(tx *bolt.Tx) error {
+		for _, s := range status {
+			bucket := tx.Bucket([]byte(s))
+			if bucket == nil {
+				log.Debug().Str("bucket", string(s)).Msg("no such bucket")
+				continue
+			}
+			err := bucket.ForEach(func(k, v []byte) error {
+				id, err := UnmarshalArtifactId(k)
+				if err != nil {
+					return err
+				}
+
+				namespaceMatch := substringMatch(id.Namespace, namespaceSubstring)
+				packageMatch := substringMatch(id.Package, packageIdSubstring)
+				log.Debug().
+					Bool("namespaceSubstring", namespaceMatch).
+					Bool("packageIdSubstring", packageMatch).
+					Interface("candidate", id).
+					Msg("Evaluation")
+				if packageMatch && namespaceMatch {
+					data := ArtifactData{}
+					_, err := asn1.Unmarshal(v, &data)
+					if err != nil {
+						return err
+					}
+					results = append(results, Artifact{
+						ArtifactId: id,
+						Repository: data.Repository,
+						Revision:   data.Revision,
+						DomainName: data.DomainName,
+						Format:     data.Format,
+						Error:      nil,
+						Problems:   nil,
+						Status:     data.Status,
+						CreateTime: data.CreateTime,
+					})
+				}
+				return nil
+			})
+			if err != nil {
+				return err
+			}
 		}
-	}
-	filter := make([]interface{}, 0)
+		return nil
+	})
 
-	statusFilter := make([]interface{}, len(status))
-	for i, s := range status {
-		statusFilter[i] = db.Row.Field("status").Eq(s)
-		listQuery := rs.table().Filter(db.Row.Field("status").Eq(s))
-		log.Info().Msgf("DB :%s", listQuery.Info())
-		return listQuery
-	}
+	return results, err
+}
 
-	filter = append(filter, db.Row.Or(statusFilter...))
-
-	if namespaceSubstring != "" {
-		filter = append(filter, db.Row.Field("namespace").Contains(namespaceSubstring))
-	}
-
-	if packageIdSubstring != "" {
-		filter = append(filter, db.Row.Field("package").Contains(packageIdSubstring))
-	}
-
-	listQuery := rs.table().Filter(db.Row.And(filter...)).OrderBy(db.Asc("id"), db.Desc("create_time"))
-	log.Info().Msgf("query :%s", listQuery.ToJSON())
-
-	return listQuery
+type Storage interface {
+	Insert(artifacts ...Artifact) ([]Artifact, error)
+	List(status []Status, namespaceSubstring, packageIdSubstring string) ([]Artifact, error)
 }
